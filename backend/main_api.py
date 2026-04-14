@@ -4,7 +4,7 @@ import json
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 
-from fastapi import FastAPI, UploadFile, File, HTTPException, Body, Depends
+from fastapi import FastAPI, UploadFile, File, HTTPException, Body, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, Response
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
@@ -46,8 +46,7 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
     return hashed_input == hashed_password
 
 
-_app_config = load_config()
-SECRET_KEY = _app_config.get("secretKey", DEFAULT_SECRET_KEY)
+SECRET_KEY = load_config().get("secretKey", DEFAULT_SECRET_KEY)
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 30
 
@@ -168,10 +167,8 @@ async def get_current_active_user(current_user: dict = Depends(get_current_user)
 
 
 def requires_auth():
-    return True
-
-
-from fastapi import Request
+    config = load_config()
+    return config.get("requireAuth", True)
 
 
 async def optional_auth(request: Request):
@@ -796,14 +793,11 @@ async def get_user_config(
                     "prompt_configs": None,
                 }
 
-            # 解析 JSON 配置
-            from json import loads
-
             return {
                 "api_key": config["api_key"],
                 "base_url": config["base_url"],
                 "model": config["model"],
-                "prompt_configs": loads(config["prompt_configs"])
+                "prompt_configs": json.loads(config["prompt_configs"])
                 if config["prompt_configs"]
                 else None,
             }
@@ -831,8 +825,6 @@ async def save_user_config(
         if not target_user:
             raise HTTPException(status_code=404, detail="User not found")
 
-        from json import dumps
-
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
         with get_db() as conn:
@@ -845,7 +837,7 @@ async def save_user_config(
             existing = cursor.fetchone()
 
             prompt_configs_json = (
-                dumps(config.prompt_configs) if config.prompt_configs else None
+                json.dumps(config.prompt_configs) if config.prompt_configs else None
             )
 
             if existing:

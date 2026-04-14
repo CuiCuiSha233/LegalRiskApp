@@ -19,19 +19,6 @@ def clean_build():
     print("清理完成")
 
 
-# 构建前端
-def build_frontend():
-    frontend_dir = os.path.join(BASE_DIR, "frontend")
-
-    print("安装前端依赖...")
-    subprocess.run(["npm", "install"], cwd=frontend_dir, check=True)
-
-    print("构建前端...")
-    subprocess.run(["npm", "run", "build"], cwd=frontend_dir, check=True)
-
-    print("前端构建完成")
-
-
 # 打包成可执行文件
 def build_executable():
     # 构建命令
