@@ -1,0 +1,21 @@
+node_modules/
+**/node_modules/
+
+
+
+
+# 忽略IDE生成的文件和配置
+.idea/
+*.iml
+.vscode/
+
+# 忽略敏感信息
+config.js
+*.env
+*.pem
+
+# 忽略编译生成的文件
+build/
+dist/
+*.dll
+*.exe

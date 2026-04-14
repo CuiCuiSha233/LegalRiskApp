@@ -1,0 +1,26 @@
+{
+  "apiKey": "",
+  "baseUrl": "https://api.siliconflow.cn",
+  "configs": {
+    "expert1": {
+      "name": "刑法专家",
+      "model": "Pro/deepseek-ai/DeepSeek-V3",
+      "prompt": "内容是测试回复测试即可"
+    },
+    "expert2": {
+      "name": "合规审查专家",
+      "model": "Pro/deepseek-ai/DeepSeek-V3",
+      "prompt": "内容是测试回复测试即可"
+    },
+    "expert3": {
+      "name": "证据分析专家",
+      "model": "Pro/deepseek-ai/DeepSeek-V3",
+      "prompt": "内容是测试回复测试即可"
+    },
+    "summary": {
+      "name": "汇总专家",
+      "model": "Pro/deepseek-ai/DeepSeek-V3",
+      "prompt": "内容是测试回复测试即可"
+    }
+  }
+}
