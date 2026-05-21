@@ -53,7 +53,7 @@ mysql -u root -p < sql/mysql_schema.sql
 
 ### 2. 配置数据库连接
 
-在项目根目录创建 `database_config.json`：
+项目根目录已有 `database_config.json`，默认配置如下：
 
 ```json
 {
@@ -62,11 +62,13 @@ mysql -u root -p < sql/mysql_schema.sql
     "host": "localhost",
     "port": 3306,
     "user": "root",
-    "password": "你的MySQL密码",
+    "password": "root",
     "database": "legal_risk_app"
   }
 }
 ```
+
+如果你的 MySQL 密码不是 `root`，直接编辑此文件修改 `password` 字段即可。
 
 ### 3. 安装依赖
 
@@ -131,6 +133,8 @@ python build.py
 LegalRiskApp/
 ├── main.py                    # 应用入口（pywebview + FastAPI）
 ├── build.py                   # PyInstaller 打包脚本
+├── database_config.json       # 数据库连接配置（按需修改）
+├── config.json                # 运行时 LLM 配置（自动生成，不入库）
 ├── backend/
 │   ├── main_api.py            # FastAPI 路由、认证、分析接口
 │   ├── core.py                # LLM 调用、并行流式分析引擎
@@ -156,7 +160,7 @@ LegalRiskApp/
 │   └── mysql_upgrade.sql      # 数据库升级脚本
 ├── SimHei.ttf                 # 中文字体（PDF 生成用）
 ├── favicon.ico                # 应用图标
-└── config.json                # 运行时配置（自动生成，不入库）
+└── database_config.json       # 数据库连接配置
 ```
 
 ## 默认端口
