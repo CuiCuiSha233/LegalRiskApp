@@ -9,7 +9,7 @@ from tkinter import filedialog
 from fastapi.staticfiles import StaticFiles
 from backend.main_api import app as api_app
 
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.1.0"
 
 _RESET = "\033[0m"
 _CYAN = "\033[36m"
