@@ -128,17 +128,53 @@
               </div>
             </div>
           </el-card>
-          
+
+          <el-card v-if="analysis.status === 'running_experts' || analysis.status === 'running_summary'" class="live-card">
+            <template #header>
+              <div class="card-header">
+                <span>🔍 专家实时分析</span>
+              </div>
+            </template>
+            <div class="live-experts">
+              <div v-for="(name, i) in liveExpertNames" :key="i" class="live-expert-col">
+                <div class="live-expert-title">
+                  {{ name || configs[Object.keys(configs)[i]]?.name || '专家' + (i+1) }}
+                  <span v-if="liveExpertDone[i]" style="color:#67c23a;"> ✅</span>
+                  <span v-else-if="liveExpertTexts[i]" class="live-cursor"> ⏳</span>
+                </div>
+                <div class="live-expert-text">
+                  <div v-if="liveExpertTexts[i]" :class="liveExpertDone[i] ? 'markdown-content' : 'live-plain-text'" v-html="liveExpertDone[i] ? renderMarkdown(liveExpertTexts[i]) : liveExpertTexts[i].replace(/\n/g, '<br>')"></div>
+                  <div v-else class="live-placeholder">等待响应...</div>
+                </div>
+              </div>
+            </div>
+          </el-card>
+
+          <el-card v-if="analysis.status === 'running_summary'" class="live-card">
+            <template #header>
+              <div class="card-header">
+                <span>📝 汇总报告生成中</span>
+              </div>
+            </template>
+            <div v-if="liveSummaryText" class="live-plain-text" v-html="liveSummaryText.replace(/\n/g, '<br>')"></div>
+            <div v-else class="live-placeholder">等待响应...</div>
+          </el-card>
+
           <el-card v-if="analysis.status === 'completed'" class="result-card">
             <template #header>
               <div class="card-header">
                 <span>📜 最终汇总研判报告</span>
-                <el-button type="success" @click="downloadPDF" class="download-btn">
-                  📥 保存 PDF
-                </el-button>
+                <div style="display:flex;gap:8px;">
+                  <el-button type="success" @click="downloadPDF" class="download-btn">📥 PDF</el-button>
+                  <el-button type="primary" @click="downloadDOCX" class="download-btn">📝 Word</el-button>
+                </div>
               </div>
             </template>
-            <div class="markdown-content" v-html="renderMarkdown(analysis.finalReport)"></div>
+            <el-skeleton :loading="!analysis.finalReport" :rows="6" animated>
+              <template #default>
+                <div class="markdown-content" v-html="renderMarkdown(analysis.finalReport)"></div>
+              </template>
+            </el-skeleton>
           </el-card>
           
           <el-card v-if="analysis.status === 'completed'" class="experts-card">
@@ -232,10 +268,13 @@
             <template #header>
               <div class="card-header">
                 <span>📋 历史报告</span>
-                <el-button type="primary" @click="loadHistory">刷新</el-button>
+                <div style="display:flex;gap:10px;">
+                  <el-input v-model="historySearch" placeholder="搜索标题..." clearable size="small" style="width:200px;" @click.stop />
+                  <el-button type="primary" @click="loadHistory">刷新</el-button>
+                </div>
               </div>
             </template>
-            <el-table :data="historyList" style="width: 100%" @row-click="viewHistory">
+            <el-table :data="filteredHistoryList" style="width: 100%" @row-click="viewHistory">
               <el-table-column prop="id" label="ID" width="60" />
               <el-table-column prop="created_at" label="时间" width="250" />
               <el-table-column label="标题" width="420">
@@ -365,12 +404,12 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useAppStore } from '../store'
 import * as api from '../api'
 import { marked } from 'marked'
 import { UploadFilled, Setting, HomeFilled, CircleCheckFilled, CircleCloseFilled, Loading, Clock, User, ArrowDown } from '@element-plus/icons-vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import * as echarts from 'echarts'
 import 'echarts-wordcloud'
 
@@ -381,6 +420,12 @@ const content = ref('')
 const loading = ref(false)
 const username = ref('')
 const historyList = ref([])
+const historySearch = ref('')
+const filteredHistoryList = computed(() => {
+  if (!historySearch.value) return historyList.value
+  const q = historySearch.value.toLowerCase()
+  return historyList.value.filter(h => (h.title || '').toLowerCase().includes(q))
+})
 const allReportsList = ref([])
 const selectedHistory = ref(null)
 
@@ -393,6 +438,26 @@ const isLoggedIn = computed(() => store.isLoggedIn)
 
 const wordCloudVisible = ref(false)
 const wordCloudChart = ref(null)
+
+const liveExpertTexts = ref(['', '', ''])
+const liveSummaryText = ref('')
+const liveExpertNames = ref(['', '', ''])
+const liveExpertDone = ref([false, false, false])
+
+const getTimestamp = () => new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')
+
+const saveBlob = async (blob, filename, successMsg = '保存成功') => {
+  if (window.pywebview?.api) {
+    const b64 = await new Promise(r => { const rd = new FileReader(); rd.onload = () => r(rd.result.split(',')[1]); rd.readAsDataURL(blob) })
+    const res = await window.pywebview.api.save_file({ filename, content: b64 })
+    res.success ? ElMessage.success(successMsg) : ElMessage.error(successMsg.replace('成功', '失败'))
+  } else {
+    const u = URL.createObjectURL(blob)
+    const a = document.createElement('a'); a.href = u; a.download = filename; a.click()
+    setTimeout(() => URL.revokeObjectURL(u), 5000)
+    ElMessage.success(successMsg)
+  }
+}
 
 username.value = 'Administrator'
 
@@ -437,15 +502,14 @@ const loadAllReports = async () => {
 
 const deleteHistory = async (id) => {
   try {
+    await ElMessageBox.confirm('确定要删除这条历史记录吗？此操作不可撤销。', '确认删除', { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' })
     await api.deleteHistory(id)
     ElMessage.success('删除成功')
     await loadHistory()
     if (selectedHistory.value && selectedHistory.value.id === id) {
       selectedHistory.value = null
     }
-  } catch (e) {
-    ElMessage.error('删除失败')
-  }
+  } catch (e) { if (e !== 'cancel') ElMessage.error('删除失败') }
 }
 
 const saveTitle = async (row) => {
@@ -472,40 +536,16 @@ let downloadHistoryPDF = async () => {
   const reports = [selectedHistory.value.expert1_report, selectedHistory.value.expert2_report, selectedHistory.value.expert3_report]
   try {
     const res = await api.downloadPDF(selectedHistory.value.final_report, reports, { expert1:{name:'刑法专家'}, expert2:{name:'合规审查专家'}, expert3:{name:'证据分析专家'} })
-    if (res.status !== 200) { throw new Error('保存失败') }
-    const blob = res.data
-    const ts = new Date().toISOString().slice(0,19).replace(/[:T]/g,'-').replace('T','_')
-    const fname = `历史报告_${selectedHistory.value.id}_${ts}.pdf`
-    if (window.pywebview?.api) {
-      const b64 = await new Promise(r => { const rd = new FileReader(); rd.onload = () => r(rd.result.split(',')[1]); rd.readAsDataURL(blob) })
-      const r = await window.pywebview.api.save_file({ filename: fname, content: b64 })
-      r.success ? ElMessage.success('保存成功') : ElMessage.error('保存失败')
-    } else {
-      const u = URL.createObjectURL(blob)
-      const a = document.createElement('a'); a.href = u; a.download = fname; a.click()
-      setTimeout(() => URL.revokeObjectURL(u), 5000)
-      ElMessage.success('保存成功')
-    }
+    if (res.status !== 200) throw new Error('保存失败')
+    await saveBlob(res.data, `历史报告_${selectedHistory.value.id}_${getTimestamp()}.pdf`)
   } catch (e) { ElMessage.error('保存失败') }
 }
 
 let downloadHistoryTXT = async (report, expertName) => {
   try {
     const res = await api.downloadTXT(report, expertName)
-    if (res.status !== 200) { throw new Error('保存失败') }
-    const blob = res.data
-    const ts = new Date().toISOString().slice(0,19).replace(/[:T]/g,'-')
-    const fname = `${expertName}报告_${ts}.txt`
-    if (window.pywebview?.api) {
-      const b64 = await new Promise(r => { const rd = new FileReader(); rd.onload = () => r(rd.result.split(',')[1]); rd.readAsDataURL(blob) })
-      const r = await window.pywebview.api.save_file({ filename: fname, content: b64 })
-      r.success ? ElMessage.success('保存成功') : ElMessage.error('保存失败')
-    } else {
-      const u = URL.createObjectURL(blob)
-      const a = document.createElement('a'); a.href = u; a.download = fname; a.click()
-      setTimeout(() => URL.revokeObjectURL(u), 5000)
-      ElMessage.success('保存成功')
-    }
+    if (res.status !== 200) throw new Error('保存失败')
+    await saveBlob(res.data, `${expertName}报告_${getTimestamp()}.txt`)
   } catch (e) { ElMessage.error('保存失败') }
 }
 
@@ -513,7 +553,7 @@ const saveAllConfig = async () => {
   const config = {
     api_key: apiForm.value.apiKey,
     base_url: apiForm.value.baseUrl,
-    model: 'Pro/deepseek-ai/DeepSeek-V3',
+    model: configs.value.expert1?.model || 'mimo-v2.5-pro',
     prompt_configs: configs.value
   }
   store.saveConfigs(configs.value)
@@ -545,91 +585,101 @@ const handleFileChange = async (file) => {
 }
 
 const startAnalysis = async () => {
-  if (!content.value) {
-    ElMessage.warning('请输入或上传待分析内容')
-    return
-  }
-  if (!apiForm.value.apiKey) {
-    ElMessage.warning('请先配置 API Key')
-    goToSettings()
-    return
-  }
-  
+  if (!content.value) { ElMessage.warning('请输入或上传待分析内容'); return }
+  if (!apiForm.value.apiKey) { ElMessage.warning('请先配置 API Key'); goToSettings(); return }
+
   loading.value = true
-  try {
-    const response = await api.analyze(
-      content.value,
-      apiForm.value.apiKey,
-      apiForm.value.baseUrl,
-      configs.value
-    )
-    store.startAnalysis(response.data.task_id)
-    pollAnalysisStatus(response.data.task_id)
-  } catch (error) {
-    ElMessage.error('分析启动失败: ' + error.message)
-    loading.value = false
-  }
-}
-
-const thinkingTexts = ['思考中...', '深度分析中...', '理解案件细节...', '查找相关法规...', '评估法律风险...', '生成专业意见...']
-const thinkingIndex = ref(0)
-let thinkingTimer = null
-
-const getThinkingText = () => {
-  return thinkingTexts[thinkingIndex.value % thinkingTexts.length]
-}
-
-const pollAnalysisStatus = async (taskId) => {
   thinkingIndex.value = 0
   expertStatusIdx.value = { 1: 0, 2: 0, 3: 0 }
+  liveExpertTexts.value = ['', '', '']
+  liveSummaryText.value = ''
+  liveExpertNames.value = ['', '', '']
+  liveExpertDone.value = [false, false, false]
+  store.startAnalysis('stream')
+
+  const expertBuf = ['', '', '']
+  let summaryBuf = ''
+  let dirty = false
+  let rafId = null
+
+  const flush = () => {
+    if (!dirty) { rafId = null; return }
+    dirty = false
+    for (let i = 0; i < 3; i++) {
+      if (expertBuf[i]) { liveExpertTexts.value[i] = expertBuf[i]; expertBuf[i] = '' }
+    }
+    if (summaryBuf) { liveSummaryText.value = summaryBuf; summaryBuf = '' }
+    rafId = requestAnimationFrame(flush)
+  }
+
+  const scheduleFlush = () => {
+    if (!rafId) rafId = requestAnimationFrame(flush)
+  }
+
   thinkingTimer = setInterval(() => {
     if (analysis.value.status === 'running_experts' || analysis.value.status === 'running_summary') {
       thinkingIndex.value++
     }
-    if (analysis.value.status === 'running_experts' && analysisProgress.value < 50) {
-      expertStatusIdx.value[1]++
-      expertStatusIdx.value[2]++
-      expertStatusIdx.value[3]++
-    }
+    for (let i = 1; i <= 3; i++) expertStatusIdx.value[i]++
   }, 1500)
-  while (true) {
-    try {
-      const response = await api.getAnalysisStatus(taskId)
-      const status = response.data
-      store.updateAnalysisStatus({
-        ...status,
-        finalReport: status.final_report,
-        reports: status.reports,
-        currentStep: status.current_step
-      })
-      if (status.status === 'completed') {
-        clearInterval(thinkingTimer)
+
+  await api.analyzeStream(
+    content.value,
+    apiForm.value.apiKey,
+    apiForm.value.baseUrl,
+    configs.value,
+    (evt) => {
+      if (evt.type === 'start') {
+        store.updateAnalysisStatus({ status: 'running_experts', progress: 20, currentStep: evt.message })
+      } else if (evt.type === 'expert_stream') {
+        expertBuf[evt.expert] = (expertBuf[evt.expert] || liveExpertTexts.value[evt.expert] || '') + evt.chunk
+        liveExpertNames.value[evt.expert] = evt.name
+        dirty = true; scheduleFlush()
+      } else if (evt.type === 'expert_done') {
+        expertBuf[evt.expert] = ''
+        liveExpertTexts.value[evt.expert] = evt.text
+        liveExpertDone.value[evt.expert] = true
+      } else if (evt.type === 'experts_done') {
+        store.updateAnalysisStatus({ reports: evt.reports, progress: 50 })
+      } else if (evt.type === 'summary_start') {
+        store.updateAnalysisStatus({ status: 'running_summary', progress: 60, currentStep: evt.message })
+      } else if (evt.type === 'summary_stream') {
+        summaryBuf = (summaryBuf || liveSummaryText.value || '') + evt.chunk
+        dirty = true; scheduleFlush()
+      } else if (evt.type === 'summary_done') {
+        summaryBuf = ''
+        liveSummaryText.value = evt.report
+        store.updateAnalysisStatus({ finalReport: evt.report, progress: 90 })
+      } else if (evt.type === 'error') {
+        store.updateAnalysisStatus({ status: 'error', error: evt.message })
+        clearInterval(thinkingTimer); if (rafId) cancelAnimationFrame(rafId)
         loading.value = false
-        const ts = new Date().toISOString().slice(0,19).replace(/[:T]/g,'-')
-        try {
-          await api.saveHistory({
-            title: `法律风险评估报告-${ts}`,
-            input_content: content.value,
-            final_report: status.final_report,
-            expert1_report: status.reports[0],
-            expert2_report: status.reports[1],
-            expert3_report: status.reports[2]
-          })
-          ElMessage.success('报告已自动保存到历史记录')
-        } catch (e) { console.error('保存历史失败', e) }
-        break
       }
-      if (status.status === 'error') {
-        clearInterval(thinkingTimer)
-        loading.value = false
-        break
-      }
-      await new Promise(r => setTimeout(r, 2000))
-    } catch { 
-      clearInterval(thinkingTimer)
-      loading.value = false; break 
+    },
+    async (data) => {
+      clearInterval(thinkingTimer); if (rafId) cancelAnimationFrame(rafId)
+      store.updateAnalysisStatus({ status: 'completed', finalReport: data.report, reports: data.reports, progress: 100, currentStep: '✅ 分析完成' })
+      loading.value = false
+      const ts = getTimestamp()
+      try {
+        await api.saveHistory({
+          title: `法律风险评估报告-${ts}`,
+          input_content: content.value,
+          final_report: data.report,
+          expert1_report: data.reports[0],
+          expert2_report: data.reports[1],
+          expert3_report: data.reports[2]
+        })
+        ElMessage.success('报告已自动保存到历史记录')
+      } catch (e) { console.error('保存历史失败', e) }
+    },
+    (err) => {
+      clearInterval(thinkingTimer); if (rafId) cancelAnimationFrame(rafId)
+      store.updateAnalysisStatus({ status: 'error', error: err })
+      loading.value = false
+      ElMessage.error('分析失败: ' + err)
     }
-  }
+  )
 }
 
 const expertStatusTexts = {
@@ -638,7 +688,12 @@ const expertStatusTexts = {
   3: ['分析中...', '正在审查证据...', '分析疑点...', '评估效力...', '生成报告...'],
 }
 const expertStatusIdx = ref({ 1: 0, 2: 0, 3: 0 })
-let expertStatusTimer = null
+
+const thinkingTexts = ['思考中...', '深度分析中...', '理解案件细节...', '查找相关法规...', '评估法律风险...', '生成专业意见...']
+const thinkingIndex = ref(0)
+let thinkingTimer = null
+
+const getThinkingText = () => thinkingTexts[thinkingIndex.value % thinkingTexts.length]
 
 const getExpertStatus = (expertNum) => {
   if (analysis.value.status !== 'running_experts' || analysisProgress.value >= 50) {
@@ -664,42 +719,25 @@ const downloadPDF = async () => {
   try {
     ElMessage.info('正在生成 PDF...')
     const response = await api.downloadPDF(analysis.value.finalReport, analysis.value.reports, configs.value)
-    if (response.status !== 200) { throw new Error('下载失败') }
-    const blob = response.data
-    const ts = new Date().toISOString().slice(0,19).replace(/[:T]/g,'-')
-    const fname = `法律风险研判报告_${ts}.pdf`
-    
-    if (window.pywebview?.api) {
-      const b64 = await new Promise(r => { const rd = new FileReader(); rd.onload = () => r(rd.result.split(',')[1]); rd.readAsDataURL(blob) })
-      const res = await window.pywebview.api.save_file({ filename: fname, content: b64 })
-      res.success ? ElMessage.success('PDF保存成功') : ElMessage.error('PDF保存失败')
-    } else {
-      const u = URL.createObjectURL(blob)
-      const a = document.createElement('a'); a.href = u; a.download = fname; a.click()
-      setTimeout(() => URL.revokeObjectURL(u), 5000)
-      ElMessage.success('PDF保存成功')
-    }
+    if (response.status !== 200) throw new Error('下载失败')
+    await saveBlob(response.data, `法律风险研判报告_${getTimestamp()}.pdf`, 'PDF保存成功')
   } catch (e) { ElMessage.error('PDF保存失败') }
+}
+
+const downloadDOCX = async () => {
+  try {
+    ElMessage.info('正在生成 Word...')
+    const response = await api.downloadDOCX(analysis.value.finalReport, analysis.value.reports, configs.value)
+    if (response.status !== 200) throw new Error('下载失败')
+    await saveBlob(response.data, `法律风险研判报告_${getTimestamp()}.docx`, 'Word保存成功')
+  } catch (e) { ElMessage.error('Word保存失败') }
 }
 
 const downloadTXT = async (report, expertName) => {
   try {
     const response = await api.downloadTXT(report, expertName)
-    if (response.status !== 200) { throw new Error('保存失败') }
-    const blob = response.data
-    const ts = new Date().toISOString().slice(0,19).replace(/[:T]/g,'-')
-    const fname = `${expertName}初步报告_${ts}.txt`
-    
-    if (window.pywebview?.api) {
-      const b64 = await new Promise(r => { const rd = new FileReader(); rd.onload = () => r(rd.result.split(',')[1]); rd.readAsDataURL(blob) })
-      const res = await window.pywebview.api.save_file({ filename: fname, content: b64 })
-      res.success ? ElMessage.success('TXT保存成功') : ElMessage.error('TXT保存失败')
-    } else {
-      const u = URL.createObjectURL(blob)
-      const a = document.createElement('a'); a.href = u; a.download = fname; a.click()
-      setTimeout(() => URL.revokeObjectURL(u), 5000)
-      ElMessage.success('TXT保存成功')
-    }
+    if (response.status !== 200) throw new Error('保存失败')
+    await saveBlob(response.data, `${expertName}初步报告_${getTimestamp()}.txt`, 'TXT保存成功')
   } catch (e) { ElMessage.error('TXT保存失败') }
 }
 
@@ -810,6 +848,10 @@ onMounted(async () => {
     }
   } catch {}
 })
+
+onUnmounted(() => {
+  if (thinkingTimer) clearInterval(thinkingTimer)
+})
 </script>
 
 <style scoped>
@@ -836,74 +878,6 @@ html, body, #app { height: 100%; overflow: hidden; }
 .top-bar h2 { font-size: 18px; font-weight: bold; margin: 0; }
 
 .top-bar-right { display: flex; gap: 10px; align-items: center; }
-
-/* 按钮基础样式优化 */
-:deep(.el-button) {
-  padding: 8px 16px;
-  border-radius: 6px;
-  font-size: 14px;
-  transition: all 0.3s ease;
-  white-space: nowrap;
-  min-width: 80px;
-  text-align: center;
-}
-
-/* 主按钮样式 */
-:deep(.el-button--primary) {
-  background-color: #409eff;
-  border-color: #409eff;
-}
-
-:deep(.el-button--primary:hover) {
-  background-color: #66b1ff;
-  border-color: #66b1ff;
-}
-
-/* 成功按钮样式 */
-:deep(.el-button--success) {
-  background-color: #67c23a;
-  border-color: #67c23a;
-}
-
-:deep(.el-button--success:hover) {
-  background-color: #85ce61;
-  border-color: #85ce61;
-}
-
-/* 警告按钮样式 */
-:deep(.el-button--warning) {
-  background-color: #e6a23c;
-  border-color: #e6a23c;
-}
-
-:deep(.el-button--warning:hover) {
-  background-color: #ebb563;
-  border-color: #ebb563;
-}
-
-/* 信息按钮样式 */
-:deep(.el-button--info) {
-  background-color: #909399;
-  border-color: #909399;
-}
-
-:deep(.el-button--info:hover) {
-  background-color: #a6a9ad;
-  border-color: #a6a9ad;
-}
-
-/* 默认按钮样式 */
-:deep(.el-button--default) {
-  background-color: #ffffff;
-  border-color: #dcdfe6;
-  color: #606266;
-}
-
-:deep(.el-button--default:hover) {
-  background-color: #ecf5ff;
-  border-color: #c6e2ff;
-  color: #409eff;
-}
 
 .content-area {
   flex: 1;
@@ -1057,4 +1031,14 @@ html, body, #app { height: 100%; overflow: hidden; }
 :deep(.el-table tr:hover) {
   background-color: #ecf5ff;
 }
+
+.live-card { margin-top: 15px; }
+.live-experts { display: flex; gap: 12px; }
+.live-expert-col { flex: 1; min-width: 0; border: 1px solid #e4e7ed; border-radius: 8px; padding: 12px; background: #fafafa; }
+.live-expert-title { font-weight: bold; font-size: 14px; margin-bottom: 8px; color: #303133; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.live-expert-text { max-height: 300px; overflow-y: auto; font-size: 13px; line-height: 1.6; }
+.live-placeholder { color: #c0c4cc; font-style: italic; padding: 20px 0; text-align: center; }
+.live-plain-text { white-space: pre-wrap; word-break: break-word; font-size: 13px; line-height: 1.8; color: #303133; max-height: 300px; overflow-y: auto; }
+.live-cursor { animation: blink 1s infinite; }
+@keyframes blink { 50% { opacity: 0.3; } }
 </style>

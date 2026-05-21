@@ -1,6 +1,8 @@
 import sys
 import os
+import io
 import json
+import time
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 
@@ -34,6 +36,9 @@ from backend.pdf_generator import generate_pdf_report
 from backend.text_extractor import extract_text
 from backend.keyword_extractor import extract_keywords
 from fastapi.responses import FileResponse
+import docx as docx_module
+
+from backend.logger import log_api, log_analysis, log_llm, log_error
 
 app = FastAPI()
 
@@ -66,10 +71,6 @@ class UserCreate(BaseModel):
     email: str = None
 
 
-class UserInDB(User):
-    password: str
-
-
 class Token(BaseModel):
     access_token: str
     token_type: str
@@ -82,7 +83,7 @@ class TokenData(BaseModel):
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -90,6 +91,44 @@ app.add_middleware(
 analysis_tasks = {}
 
 init_db()
+
+
+def _log(tag, msg):
+    ts = time.strftime("%H:%M:%S")
+    print(f"  \033[90m[{ts}]\033[0m {tag} {msg}")
+
+
+@app.middleware("http")
+async def logging_middleware(request: Request, call_next):
+    skip_paths = ("/api/analysis/status", "/favicon.ico")
+    if any(request.url.path.startswith(p) for p in skip_paths):
+        return await call_next(request)
+    start = time.time()
+    response = await call_next(request)
+    duration = (time.time() - start) * 1000
+    log_api(request.method, request.url.path, response.status_code, duration)
+    return response
+
+
+@app.on_event("startup")
+async def startup():
+    _log("\033[36m[API]\033[0m", "\033[32m✓ FastAPI 路由注册完成\033[0m")
+    _log("\033[36m[DB]\033[0m", "\033[32m✓ 数据库初始化完成\033[0m")
+    _log("\033[36m[API]\033[0m", f"  已注册端点: \033[33m/api/analyze/stream\033[0m | \033[33m/api/extract-keywords\033[0m | \033[33m/api/download/pdf\033[0m | \033[33m/api/download/docx\033[0m")
+
+
+def row_to_dict(cursor, row):
+    if row and isinstance(row, tuple) and cursor.description:
+        columns = [desc[0] for desc in cursor.description]
+        return dict(zip(columns, row))
+    return row
+
+
+def rows_to_dicts(cursor, rows):
+    if not rows or not cursor.description:
+        return rows
+    columns = [desc[0] for desc in cursor.description]
+    return [dict(zip(columns, row)) for row in rows]
 
 
 @app.get("/favicon.ico")
@@ -106,12 +145,7 @@ def get_user(username: str):
         cursor = execute_query(
             conn, "SELECT * FROM users WHERE username = ?", (username,)
         )
-        user = cursor.fetchone()
-        if user and isinstance(user, tuple):
-            if cursor.description:
-                columns = [desc[0] for desc in cursor.description]
-                user = dict(zip(columns, user))
-    return user
+        return row_to_dict(cursor, cursor.fetchone())
 
 
 def authenticate_user(username: str, password: str):
@@ -166,7 +200,7 @@ async def get_current_user(token: str = Depends(oauth2_scheme)):
                 (now, username),
             )
             conn.commit()
-    except:
+    except Exception:
         pass
 
     return user
@@ -293,58 +327,51 @@ async def event_generator(
     task_id: str, api_key: str, base_url: str, content: str, all_configs: dict
 ):
     client = AsyncOpenAI(api_key=api_key, base_url=base_url)
-    expert_names = ["刑法专家", "合规审查专家", "证据分析专家"]
-    expert_configs = {
-        "expert1": all_configs.get("expert1", all_configs["expert1"]),
-        "expert2": all_configs.get("expert2", all_configs["expert2"]),
-        "expert3": all_configs.get("expert3", all_configs["expert3"]),
-    }
+    expert_names = [v["name"] for k, v in sorted(all_configs.items()) if k.startswith("expert")]
+    expert_configs = {k: v for k, v in sorted(all_configs.items()) if k.startswith("expert")}
 
+    log_analysis(f"━━━ 开始并行流式分析 ━━━  专家: {len(expert_configs)}位  模型: {list(expert_configs.values())[0]['model']}")
+    log_analysis(f"  任务ID: {task_id}  输入: {len(content)} 字")
     yield f'data: {{"type": "start", "message": "开始专家分析..."}}\n\n'
 
-    expert_texts = ["", "", ""]
-    expert_streams = await run_expert_analysis_stream(client, content, expert_configs)
+    expert_texts = [""] * len(expert_configs)
 
-    for expert_idx, stream in enumerate(expert_streams):
-        expert_name = expert_names[expert_idx]
-        async for chunk in stream:
-            if chunk.startswith("[ERROR]"):
-                yield f'data: {{"type": "error", "expert": {expert_idx}, "message": "{chunk}"}}\n\n'
-                return
-            if chunk.startswith("[FINAL]"):
-                expert_texts[expert_idx] = chunk.replace("[FINAL]", "").strip()
-                preview = (
-                    expert_texts[expert_idx][:50] + "..."
-                    if len(expert_texts[expert_idx]) > 50
-                    else expert_texts[expert_idx]
-                )
-                yield f'data: {{"type": "expert_done", "expert": {expert_idx}, "name": "{expert_name}", "preview": "{preview}"}}\n\n'
-            else:
-                expert_texts[expert_idx] += chunk
-                preview = (
-                    expert_texts[expert_idx][-80:]
-                    if len(expert_texts[expert_idx]) > 80
-                    else expert_texts[expert_idx]
-                )
-                yield f'data: {{"type": "expert_stream", "expert": {expert_idx}, "name": "{expert_name}", "preview": "{preview}"}}\n\n'
+    async for expert_idx, chunk in run_expert_analysis_stream(client, content, expert_configs):
+        if expert_idx == -1 and chunk == "[ALL_DONE]":
+            log_analysis(f"  ✅ 全部专家分析完成  共 {len(expert_texts)} 份报告")
+            yield f"data: {json.dumps({'type': 'experts_done', 'reports': expert_texts})}\n\n"
+            continue
+        expert_name = expert_names[expert_idx] if expert_idx < len(expert_names) else f"专家{expert_idx+1}"
+        if chunk.startswith("[ERROR]"):
+            log_error(f"  ❌ {expert_name} 分析失败: {chunk}")
+            yield f"data: {json.dumps({'type': 'error', 'expert': expert_idx, 'message': chunk})}\n\n"
+            return
+        if chunk.startswith("[FINAL]"):
+            expert_texts[expert_idx] = chunk.replace("[FINAL]", "").strip()
+            log_analysis(f"  ✅ {expert_name} 报告生成完成  ({len(expert_texts[expert_idx])} 字)")
+            yield f"data: {json.dumps({'type': 'expert_done', 'expert': expert_idx, 'name': expert_name, 'text': expert_texts[expert_idx]})}\n\n"
+        else:
+            expert_texts[expert_idx] += chunk
+            yield f"data: {json.dumps({'type': 'expert_stream', 'expert': expert_idx, 'name': expert_name, 'chunk': chunk})}\n\n"
 
-    yield f"data: {json.dumps({'type': 'experts_done', 'reports': expert_texts})}\n\n"
-
+    log_analysis("━━━ 开始汇总分析 ━━━")
     yield f'data: {{"type": "summary_start", "message": "开始汇总分析..."}}\n\n'
 
     summary_text = ""
     async for chunk in run_summary_analysis_stream(client, expert_texts, all_configs):
         if chunk.startswith("[ERROR]"):
-            yield f'data: {{"type": "error", "summary": true, "message": "{chunk}"}}\n\n'
+            log_error(f"  ❌ 汇总分析失败: {chunk}")
+            yield f"data: {json.dumps({'type': 'error', 'summary': True, 'message': chunk})}\n\n"
             return
         if chunk.startswith("[FINAL]"):
             summary_text = chunk.replace("[FINAL]", "").strip()
-            yield f'data: {{"type": "summary_done", "report": "{summary_text}"}}\n\n'
+            log_analysis(f"  ✅ 汇总报告生成完成  ({len(summary_text)} 字)")
+            yield f"data: {json.dumps({'type': 'summary_done', 'report': summary_text})}\n\n"
         else:
             summary_text += chunk
-            preview = summary_text[-80:] if len(summary_text) > 80 else summary_text
-            yield f'data: {{"type": "summary_stream", "preview": "{preview}"}}\n\n'
+            yield f"data: {json.dumps({'type': 'summary_stream', 'chunk': chunk})}\n\n"
 
+    log_analysis(f"━━━ 分析流程结束 ━━━  总报告: {len(summary_text)} 字")
     yield f"data: {json.dumps({'type': 'complete', 'report': summary_text, 'reports': expert_texts})}\n\n"
 
 
@@ -363,8 +390,12 @@ async def analyze_stream(
 
     all_configs = configs if configs else PROMPT_CONFIGS
 
+    import uuid
+    task_id = f"task_{uuid.uuid4().hex[:8]}"
+    log_analysis(f"收到分析请求  内容: {len(content)} 字  API: {base_url}  专家: {len([k for k in all_configs if k.startswith('expert')])}位")
+
     return StreamingResponse(
-        event_generator(content, api_key, base_url, content, all_configs),
+        event_generator(task_id, api_key, base_url, content, all_configs),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -388,7 +419,9 @@ async def upload_file(
 ):
     try:
         content = await file.read()
+        log_api("FILE", f"文件上传: {file.filename}  类型: {file.content_type}  大小: {len(content)/1024:.1f}KB")
         text = extract_text(content, file.content_type)
+        log_api("FILE", f"文本提取完成: {len(text)} 字")
         return {"content": text}
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Error processing file: {str(e)}")
@@ -402,6 +435,7 @@ def download_pdf(
     current_user: dict = Depends(optional_auth),
 ):
     try:
+        log_api("EXPORT", "正在生成 PDF 报告...")
         experts_data = {}
         for i, (key, cfg) in enumerate(configs.items()):
             if i < len(reports):
@@ -416,6 +450,7 @@ def download_pdf(
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         file_name = f"法律风险研判报告_{timestamp}.pdf"
         encoded_file_name = quote(file_name)
+        log_api("EXPORT", f"PDF 报告生成完成: {file_name}")
 
         return StreamingResponse(
             pdf_buffer,
@@ -447,6 +482,38 @@ def download_txt(
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error generating TXT: {str(e)}")
+
+
+@app.post("/api/download/docx")
+def download_docx(
+    final_report: str = Body(...),
+    reports: list = Body(...),
+    configs: dict = Body(...),
+    current_user: dict = Depends(optional_auth),
+):
+    try:
+        doc = docx_module.Document()
+        doc.add_heading("法律风险多模型研判报告", level=0)
+        doc.add_paragraph(final_report)
+        for i, (key, cfg) in enumerate(configs.items()):
+            if i < len(reports):
+                doc.add_heading(cfg["name"], level=1)
+                doc.add_paragraph(reports[i])
+        buf = io.BytesIO()
+        doc.save(buf)
+        buf.seek(0)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        file_name = f"法律风险研判报告_{timestamp}.docx"
+        encoded_file_name = quote(file_name)
+        return StreamingResponse(
+            buf,
+            media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            headers={
+                "Content-Disposition": f"attachment; filename*=UTF-8''{encoded_file_name}"
+            },
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error generating DOCX: {str(e)}")
 
 
 @app.get("/api/config")
@@ -489,11 +556,7 @@ def get_history(limit: int = 20, current_user: dict = Depends(optional_auth)):
                     (limit,),
                 )
             rows = cursor.fetchall()
-            # 转换为字典
-            if rows and len(rows) > 0 and isinstance(rows[0], tuple):
-                if cursor.description:
-                    columns = [desc[0] for desc in cursor.description]
-                    rows = [dict(zip(columns, row)) for row in rows]
+            rows = rows_to_dicts(cursor, rows)
         return [
             {
                 "id": r["id"],
@@ -522,12 +585,7 @@ def get_history_detail(report_id: int, current_user: dict = Depends(optional_aut
             """,
                 (report_id,),
             )
-            row = cursor.fetchone()
-            # 转换为字典
-            if row and isinstance(row, tuple):
-                if cursor.description:
-                    columns = [desc[0] for desc in cursor.description]
-                    row = dict(zip(columns, row))
+            row = row_to_dict(cursor, cursor.fetchone())
         if not row:
             raise HTTPException(status_code=404, detail="Report not found")
         return row
@@ -610,6 +668,7 @@ def get_keywords(data: dict = Body(...), current_user: dict = Depends(optional_a
         text = data.get("text", "")
         top_n = data.get("top_n", 50)
         keywords = extract_keywords(text, top_n)
+        log_api("NLP", f"关键词提取: 输入 {len(text)} 字  提取 {len(keywords)} 个关键词  top_n={top_n}")
         return {"keywords": keywords}
     except Exception as e:
         raise HTTPException(
@@ -622,6 +681,7 @@ def register(user: UserCreate):
     try:
         existing_user = get_user(user.username)
         if existing_user:
+            log_api("AUTH", f"注册失败: 用户名 {user.username} 已存在", 400)
             raise HTTPException(status_code=400, detail="Username already registered")
 
         hashed_password = hash_password(user.password)
@@ -635,6 +695,7 @@ def register(user: UserCreate):
             )
             conn.commit()
 
+        log_api("AUTH", f"新用户注册: {user.username}", 200)
         return {"username": user.username, "email": user.email, "role": "user"}
     except HTTPException:
         raise
@@ -647,6 +708,7 @@ def login(form_data: OAuth2PasswordRequestForm = Depends()):
     try:
         user = authenticate_user(form_data.username, form_data.password)
         if not user:
+            log_api("AUTH", f"登录失败: {form_data.username} 用户名或密码错误", 401)
             raise HTTPException(
                 status_code=401,
                 detail="Incorrect username or password",
@@ -667,7 +729,9 @@ def login(form_data: OAuth2PasswordRequestForm = Depends()):
                             status_code=403,
                             detail="User is already logged in from another device",
                         )
-                except:
+                except HTTPException:
+                    raise
+                except Exception:
                     pass
 
         access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
@@ -685,6 +749,7 @@ def login(form_data: OAuth2PasswordRequestForm = Depends()):
             )
             conn.commit()
 
+        log_api("AUTH", f"用户登录: {user['username']}  角色: {user.get('role', 'user')}", 200)
         return {"access_token": access_token, "token_type": "bearer"}
     except HTTPException:
         raise
@@ -729,12 +794,7 @@ async def get_users(current_user: dict = Depends(get_current_active_user)):
                 "SELECT id, username, email, created_at, last_login, role FROM users",
             )
             users = cursor.fetchall()
-            # 转换为字典
-            if users and len(users) > 0 and isinstance(users[0], tuple):
-                # MySQL 返回元组列表，需要手动转换
-                if cursor.description:
-                    columns = [desc[0] for desc in cursor.description]
-                    users = [dict(zip(columns, row)) for row in users]
+            users = rows_to_dicts(cursor, users)
 
         return users
     except HTTPException:
@@ -790,10 +850,7 @@ async def get_user_config(
                 (target_user["id"],),
             )
             config = cursor.fetchone()
-            if config and isinstance(config, tuple):
-                if cursor.description:
-                    columns = [desc[0] for desc in cursor.description]
-                    config = dict(zip(columns, config))
+            config = row_to_dict(cursor, config)
 
             if not config:
                 return {
@@ -966,11 +1023,7 @@ async def get_all_reports(current_user: dict = Depends(get_current_active_user))
                 ORDER BY r.created_at DESC
                 """,
             )
-            rows = cursor.fetchall()
-            if rows and len(rows) > 0 and isinstance(rows[0], tuple):
-                if cursor.description:
-                    columns = [desc[0] for desc in cursor.description]
-                    rows = [dict(zip(columns, row)) for row in rows]
+            rows = rows_to_dicts(cursor, cursor.fetchall())
 
         return rows
     except HTTPException:

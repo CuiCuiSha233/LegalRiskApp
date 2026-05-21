@@ -1,11 +1,12 @@
 import asyncio
-from openai import AsyncOpenAI
 from backend.config import PROMPT_CONFIGS, SUMMARY_PROMPT, DEFAULT_MODEL
 from backend.pdf_generator import truncate_text, MAX_CONTENT_LENGTH
+from backend.logger import log_llm
 
 
-async def call_llm(client, model, system_prompt, user_content, max_tokens=160000):
+async def call_llm(client, model, system_prompt, user_content, max_tokens=4096):
     try:
+        log_llm(f"  ↗ 调用模型: {model}  输入: {len(user_content)} 字  max_tokens: {max_tokens}")
         response = await client.chat.completions.create(
             model=model,
             messages=[
@@ -16,6 +17,9 @@ async def call_llm(client, model, system_prompt, user_content, max_tokens=160000
             max_tokens=max_tokens,
         )
         report = response.choices[0].message.content
+        usage = getattr(response, 'usage', None)
+        tokens_str = f"  tokens: {usage.total_tokens}" if usage else ""
+        log_llm(f"  ↙ 模型响应: {model}  输出: {len(report)} 字{tokens_str}")
 
         lines = report.split("\n")
         cleaned_lines = []
@@ -27,11 +31,12 @@ async def call_llm(client, model, system_prompt, user_content, max_tokens=160000
         return "\n".join(cleaned_lines).strip()
 
     except Exception as e:
+        log_llm(f"  ❌ 模型调用失败: {model}  错误: {str(e)[:100]}")
         return f"模型调用失败 ({model}): {str(e)}"
 
 
 async def call_llm_stream(
-    client, model, system_prompt, user_content, max_tokens=160000
+    client, model, system_prompt, user_content, max_tokens=4096
 ):
     try:
         response = await client.chat.completions.create(
@@ -47,6 +52,8 @@ async def call_llm_stream(
 
         full_content = ""
         async for chunk in response:
+            if not chunk.choices:
+                continue
             delta = chunk.choices[0].delta.content
             if delta:
                 full_content += delta
@@ -58,7 +65,7 @@ async def call_llm_stream(
             if "日期" in line or "出具人" in line or "注：" in line:
                 continue
             cleaned_lines.append(line)
-        yield "\n[FINAL]" + "\n".join(cleaned_lines).strip()
+        yield "[FINAL]" + "\n".join(cleaned_lines).strip()
 
     except Exception as e:
         yield f"[ERROR]模型调用失败 ({model}): {str(e)}"
@@ -75,12 +82,34 @@ async def run_expert_analysis(client, content_to_analyze, all_configs):
 
 async def run_expert_analysis_stream(client, content_to_analyze, all_configs):
     content_to_analyze = truncate_text(content_to_analyze, MAX_CONTENT_LENGTH)
-    streams = []
-    for key, cfg in all_configs.items():
-        streams.append(
-            call_llm_stream(client, cfg["model"], cfg["prompt"], content_to_analyze)
-        )
-    return streams
+    queue = asyncio.Queue()
+    expert_keys = list(all_configs.keys())
+    total = len(expert_keys)
+
+    async def _stream_expert(idx, cfg):
+        try:
+            async for chunk in call_llm_stream(client, cfg["model"], cfg["prompt"], content_to_analyze):
+                await queue.put((idx, chunk))
+        except Exception as e:
+            await queue.put((idx, f"[ERROR]模型调用失败 ({cfg['model']}): {str(e)}"))
+        finally:
+            await queue.put((idx, None))
+
+    for i, k in enumerate(expert_keys):
+        asyncio.create_task(_stream_expert(i, all_configs[k]))
+
+    finished = 0
+    final_set = set()
+    while finished < total:
+        idx, chunk = await queue.get()
+        if chunk is None:
+            finished += 1
+            continue
+        yield idx, chunk
+        if chunk.startswith("[FINAL]"):
+            final_set.add(idx)
+            if len(final_set) == total:
+                yield -1, "[ALL_DONE]"
 
 
 async def run_summary_analysis(client, reports, all_configs):

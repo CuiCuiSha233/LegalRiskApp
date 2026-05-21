@@ -3,7 +3,7 @@ import re
 import docx
 import json
 
-from backend.pdf_generator import truncate_text, MAX_CONTENT_LENGTH
+from backend.pdf_generator import truncate_text
 
 remove_for_analysis = [
     "source",
@@ -32,7 +32,7 @@ def extract_text(file_content, file_type):
         clean_text = re.sub(r",(\s*[}\]])", r"\1", clean_text)
         try:
             data = json.loads(clean_text)
-        except:
+        except (json.JSONDecodeError, ValueError):
             return "Error: JSON格式不正确"
 
         if isinstance(data, dict):

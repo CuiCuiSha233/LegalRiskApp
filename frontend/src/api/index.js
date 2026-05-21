@@ -1,12 +1,10 @@
 import axios from 'axios'
 
-// 创建 axios 实例
 const api = axios.create({
   baseURL: '/api',
   timeout: 60000
 })
 
-// 分析接口
 export const analyze = (content, apiKey, baseUrl, configs) => {
   return api.post('/analyze', {
     content,
@@ -14,6 +12,40 @@ export const analyze = (content, apiKey, baseUrl, configs) => {
     base_url: baseUrl,
     configs
   })
+}
+
+export const analyzeStream = async (content, apiKey, baseUrl, configs, onEvent, onDone, onError) => {
+  const token = localStorage.getItem('token')
+  try {
+    const resp = await fetch('/api/analyze/stream', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(token ? { 'Authorization': `Bearer ${token}` } : {})
+      },
+      body: JSON.stringify({ content, api_key: apiKey, base_url: baseUrl, configs })
+    })
+    if (!resp.ok) { onError?.(`HTTP ${resp.status}`); return }
+    const reader = resp.body.getReader()
+    const decoder = new TextDecoder()
+    let buffer = ''
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      buffer += decoder.decode(value, { stream: true })
+      const lines = buffer.split('\n')
+      buffer = lines.pop()
+      for (const line of lines) {
+        if (line.startsWith('data: ')) {
+          try {
+            const data = JSON.parse(line.slice(6))
+            onEvent?.(data)
+            if (data.type === 'complete') onDone?.(data)
+          } catch {}
+        }
+      }
+    }
+  } catch (e) { onError?.(e.message) }
 }
 
 // 获取分析状态
@@ -48,6 +80,16 @@ export const downloadTXT = (report, expertName) => {
   return api.post('/download/txt', {
     report,
     expert_name: expertName
+  }, {
+    responseType: 'blob'
+  })
+}
+
+export const downloadDOCX = (finalReport, reports, configs) => {
+  return api.post('/download/docx', {
+    final_report: finalReport,
+    reports,
+    configs
   }, {
     responseType: 'blob'
   })

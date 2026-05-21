@@ -25,7 +25,6 @@ STOP_WORDS = {
     "但",
     "可",
     "以",
-    "及",
     "从",
     "将",
     "并",
@@ -216,7 +215,6 @@ STOP_WORDS = {
     "msgSeq",
     "timestamp",
     "isAt",
-    "createTime",
     "subType",
     "ext",
     "img",
@@ -312,7 +310,7 @@ def extract_keywords(text, top_n=50):
         contents = extract_message_content(data)
         if contents:
             segment_text = "\n".join(contents)
-    except:
+    except (json.JSONDecodeError, ValueError):
         segment_text = extract_display_names_from_text(text)
 
     all_stops = STOP_WORDS | extra_stops
