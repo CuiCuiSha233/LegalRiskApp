@@ -12,7 +12,7 @@
           <el-input v-model="form.password" type="password" placeholder="请输入密码" show-password />
         </el-form-item>
         <el-form-item label="邮箱" prop="email" v-if="!isLogin">
-          <el-input v-model="form.email" type="email" placeholder="请输入邮箱（选填）" />
+          <el-input v-model="form.email" type="email" placeholder="请输入邮箱" />
         </el-form-item>
         <el-form-item>
           <el-button type="primary" @click="handleSubmit" :loading="loading" style="width: 100%">

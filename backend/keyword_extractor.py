@@ -163,6 +163,7 @@ STOP_WORDS = {
     "好友",
     "聊天记录",
     "消息",
+    "文本",
     "文本消息",
     "图片",
     "表情",
@@ -233,10 +234,21 @@ def extract_keywords(text, top_n=50):
 
     extra_stops = set()
 
+    def _add_name_to_stops(name):
+        extra_stops.add(name)
+        chinese = re.findall(r"[\u4e00-\u9fff]+", name)
+        for c in chinese:
+            extra_stops.add(c)
+        non_chinese = re.sub(r"[\u4e00-\u9fff]+", "", name).strip()
+        if non_chinese:
+            extra_stops.add(non_chinese)
+
     def extract_all_values(d):
         if isinstance(d, dict):
             for key, val in d.items():
                 key_lower = key.lower()
+                if key_lower == "type" and isinstance(val, str):
+                    _add_name_to_stops(val)
                 if (
                     "sender" in key_lower
                     or "nick" in key_lower
@@ -247,13 +259,7 @@ def extract_keywords(text, top_n=50):
                     or "chat" in key_lower
                 ):
                     if val and isinstance(val, str):
-                        extra_stops.add(val)
-                        chinese = re.findall(r"[\u4e00-\u9fff]+", val)
-                        for c in chinese:
-                            extra_stops.add(c)
-                        non_chinese = re.sub(r"[\u4e00-\u9fff]+", "", val).strip()
-                        if non_chinese:
-                            extra_stops.add(non_chinese)
+                        _add_name_to_stops(val)
                 if isinstance(val, dict):
                     extract_all_values(val)
                 elif isinstance(val, list):
@@ -265,31 +271,49 @@ def extract_keywords(text, top_n=50):
                 if isinstance(item, dict):
                     extract_all_values(item)
 
-    def extract_display_names_from_text(text):
-        patterns = [
-            r'"senderDisplayName"\s*:\s*"([^"]+)"',
-            r'"senderNickName"\s*:\s*"([^"]+)"',
-            r'"displayName"\s*:\s*"([^"]+)"',
-            r'"nickName"\s*:\s*"([^"]+)"',
-            r'"sender"\s*:\s*"([^"]+)"',
+    def extract_message_content(d):
+        contents = []
+        if isinstance(d, dict):
+            for key, val in d.items():
+                if key.lower() == "content" and isinstance(val, str) and val.strip():
+                    contents.append(val)
+                if isinstance(val, dict):
+                    contents.extend(extract_message_content(val))
+                elif isinstance(val, list):
+                    for item in val:
+                        contents.extend(extract_message_content(item))
+        elif isinstance(d, list):
+            for item in d:
+                contents.extend(extract_message_content(item))
+        return contents
+
+    def extract_display_names_from_text(raw):
+        name_fields = [
+            "senderDisplayName", "senderNickName", "displayName", "nickName", "sender"
         ]
-        for pattern in patterns:
-            matches = re.findall(pattern, text)
-            for val in matches:
+        cleaned = raw
+        for field in name_fields:
+            pat = rf'"{field}"\s*:\s*"([^"]*)"'
+            for val in re.findall(pat, cleaned):
                 if val:
-                    extra_stops.add(val)
-                    chinese = re.findall(r"[\u4e00-\u9fff]+", val)
-                    for c in chinese:
-                        extra_stops.add(c)
-                    non_chinese = re.sub(r"[\u4e00-\u9fff]+", "", val).strip()
-                    if non_chinese:
-                        extra_stops.add(non_chinese)
+                    _add_name_to_stops(val)
+            cleaned = re.sub(pat, "", cleaned)
+        for val in re.findall(r'"type"\s*:\s*"([^"]*)"', raw):
+            if val:
+                _add_name_to_stops(val)
+        cleaned = re.sub(r'"type"\s*:\s*"[^"]*"', "", cleaned)
+        return cleaned
+
+    segment_text = text
 
     try:
         data = json.loads(text)
         extract_all_values(data)
+        contents = extract_message_content(data)
+        if contents:
+            segment_text = "\n".join(contents)
     except:
-        extract_display_names_from_text(text)
+        segment_text = extract_display_names_from_text(text)
 
     all_stops = STOP_WORDS | extra_stops
 
@@ -297,9 +321,9 @@ def extract_keywords(text, top_n=50):
         import jieba
 
         jieba.setLogLevel(jieba.logging.WARNING)
-        words = jieba.cut(text)
+        words = jieba.cut(segment_text)
     except ImportError:
-        words = re.findall(r"[\u4e00-\u9fff]+", text)
+        words = re.findall(r"[\u4e00-\u9fff]+", segment_text)
 
     word_freq = {}
     for word in words:

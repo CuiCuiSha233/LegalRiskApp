@@ -33,6 +33,7 @@ from backend.config import load_config, save_config, DEFAULT_SECRET_KEY
 from backend.pdf_generator import generate_pdf_report
 from backend.text_extractor import extract_text
 from backend.keyword_extractor import extract_keywords
+from fastapi.responses import FileResponse
 
 app = FastAPI()
 
@@ -89,6 +90,15 @@ app.add_middleware(
 analysis_tasks = {}
 
 init_db()
+
+
+@app.get("/favicon.ico")
+async def favicon():
+    base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.dirname(__file__)))
+    path = os.path.join(base, "favicon.ico")
+    if os.path.exists(path):
+        return FileResponse(path)
+    raise HTTPException(status_code=404)
 
 
 def get_user(username: str):

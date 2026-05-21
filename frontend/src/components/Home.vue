@@ -162,7 +162,7 @@
           <el-card v-if="analysis.status === 'completed'" class="wordcloud-card">
             <template #header>
               <div class="card-header">
-                <span>☁️ 敏感词词云</span>
+                <span>☁️ 分词词云</span>
                 <el-button type="primary" @click="generateWordCloud">
                   点击生成词云
                 </el-button>
